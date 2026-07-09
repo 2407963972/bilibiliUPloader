@@ -594,6 +594,7 @@
     document.head.appendChild(style);
     createPanel();
 
+    
     const tasks = getTasks();
     document.getElementById('bili-batch-stats').textContent = '检测到 ' + tasks.length + ' 个视频任务';
     logMsg('B站批量投稿设置助手 v2.1 已启动');
