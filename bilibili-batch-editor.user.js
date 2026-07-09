@@ -189,43 +189,23 @@
     return true;
   }
 
-  /** 设置封面 — 点开封面编辑器，通过 DataTransfer 注入文件 */
+  /** 设置封面 — 点开封面编辑器，找到封面编辑器内的 file input 注入文件 */
   async function setCover(file) {
     if (!file) { logMsg('  [WARN] 未选择封面文件'); return false; }
 
     // 1. 点开封面编辑器
-    let editText = document.querySelector('.edit-text');
-    if (editText) {
-      editText.click();
-      await delay(800);
-    }
+    const editText = document.querySelector('.edit-text');
+    if (!editText) { logMsg('  [WARN] 未找到封面入口'); return false; }
+    editText.click();
+    logMsg('  已打开封面编辑器');
+    await delay(1000);
 
-    // 2. 查找封面编辑器中的 file input
-    // 封面编辑器面板通常含 .cover-editor-panel-select 或 .bcc-upload
-    let fileInput = null;
-    const uploadWrappers = document.querySelectorAll('.bcc-upload-wrapper');
-    for (const w of uploadWrappers) {
-      const inp = w.querySelector('input[type="file"]');
-      if (inp) { fileInput = inp; break; }
-    }
+    // 2. 仅在封面编辑器面板 .cover-editor-panel-select 内查找 file input
+    const panel = document.querySelector('.cover-editor-panel-select');
+    if (!panel) { logMsg('  [WARN] 封面编辑器面板未出现'); return false; }
 
-    if (!fileInput) {
-      // 回退：任意 file input
-      const allInputs = document.querySelectorAll('input[type="file"]');
-      for (const inp of allInputs) {
-        const parentClass = inp.parentElement?.className || '';
-        if (parentClass.includes('upload') || parentClass.includes('cover')) {
-          fileInput = inp; break;
-        }
-      }
-    }
-
-    if (!fileInput) {
-      logMsg('  [WARN] 未找到封面上传 input，尝试关闭编辑器重试');
-      document.body.click();
-      await delay(300);
-      return false;
-    }
+    const fileInput = panel.querySelector('input[type="file"]');
+    if (!fileInput) { logMsg('  [WARN] 封面编辑器内未找到 file input'); return false; }
 
     // 3. 注入文件
     try {
@@ -240,15 +220,27 @@
       return false;
     }
 
-    // 4. 等待上传完成，然后关闭编辑器
-    await delay(1500);
-    // 尝试关闭封面编辑器
-    const closeBtns = document.querySelectorAll('[class*="close"], .icon-close, [class*="cancel"]');
-    for (const btn of closeBtns) {
-      if (btn.offsetHeight > 0) { btn.click(); break; }
+    // 4. 等待上传完成后关闭封面编辑器
+    await delay(2000);
+
+    // 点击封面编辑器里的「完成」按钮
+    const allBtns = panel.querySelectorAll('button');
+    let doneBtn = null;
+    for (const btn of allBtns) {
+      if (btn.textContent.trim() === '完成') { doneBtn = btn; break; }
     }
-    document.body.click();
-    await delay(300);
+    // 也试试 class 名匹配
+    if (!doneBtn) {
+      doneBtn = panel.querySelector('button[class*="confirm"], button[class*="ok"], button[class*="save"], button[class*="submit"], button[class*="done"], button[class*="complete"]');
+    }
+    if (doneBtn) {
+      doneBtn.click();
+      logMsg('  已点击「完成」按钮');
+    } else {
+      logMsg('  [WARN] 未找到完成按钮，点空白处关闭');
+      document.body.click();
+    }
+    await delay(500);
 
     return true;
   }
