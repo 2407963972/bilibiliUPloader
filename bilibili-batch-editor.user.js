@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站批量投稿设置助手
 // @namespace    https://github.com/user/bilibili-batch-editor
-// @version      1.0.0
-// @description  批量设置B站待投稿视频：仅自己可见、封面、分区「绘画」、创意声明「内容无需标注」、推荐标签
+// @version      2.1.0
+// @description  批量设置B站批量上传页视频：仅自己可见、封面、分区「绘画」、创作声明「内容无需标注」、推荐标签
 // @author       User
 // @match        https://member.bilibili.com/platform/upload/video/*
 // @grant        none
@@ -16,27 +16,11 @@
   // 配置
   // ===========================
   const CONFIG = {
-    // API 基础地址
-    API_BASE: 'https://member.bilibili.com',
-
-    // 分区 ID 映射 — 绘画 = 162
-    CATEGORY_TID: {
-      DRAWING: 162,
-    },
-
-    // 创作声明默认值：内容无需标注
-    COPYRIGHT: 1,         // 1=原创, 2=转载
-    NO_REPRINT: 0,        // 0=允许转载, 1=禁止转载
-
-    // 操作间隔（毫秒），避免触发风控
-    DELAY_MS: 2000,
-
-    // 请求超时
-    TIMEOUT_MS: 30000,
-
-    // 面板样式色
+    DECLARATION_TEXT: '内容无需标注',
+    PRIVACY_TEXT: '仅自己可见',
+    DELAY_BETWEEN_TASKS: 2500,
+    DELAY_AFTER_CLICK: 800,
     ACCENT_COLOR: '#00a1d6',
-    ACCENT_HOVER: '#00b5e5',
     BG_COLOR: '#fff',
     PANEL_Z_INDEX: 99999,
   };
@@ -44,688 +28,29 @@
   // ===========================
   // 工具函数
   // ===========================
-
-  /** 从 Cookie 中获取值 */
-  function getCookie(name) {
-    const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
-    return match ? decodeURIComponent(match[1]) : '';
-  }
-
-  /** 获取 CSRF Token */
-  function getCsrfToken() {
-    return getCookie('bili_jct');
-  }
-
-  /** 延迟 */
   function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
-
-  /** 创建通知提示 */
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
   function notify(message, type) {
     const types = { success: '#52c41a', error: '#ff4d4f', info: '#1890ff', warning: '#faad14' };
     const el = document.createElement('div');
     el.textContent = `[B站批量投稿] ${message}`;
     Object.assign(el.style, {
-      position: 'fixed',
-      top: '20px',
-      right: '20px',
-      zIndex: CONFIG.PANEL_Z_INDEX + 10,
-      padding: '12px 20px',
-      borderRadius: '6px',
-      background: '#1e1e1e',
-      color: types[type] || types.info,
-      fontSize: '14px',
-      fontWeight: '500',
+      position: 'fixed', top: '20px', right: '20px', zIndex: CONFIG.PANEL_Z_INDEX + 10,
+      padding: '12px 20px', borderRadius: '6px', background: '#1e1e1e',
+      color: types[type] || types.info, fontSize: '14px', fontWeight: '500',
       boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
-      animation: 'biliBatchFadeIn 0.3s ease',
       pointerEvents: 'none',
     });
     document.body.appendChild(el);
     setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.5s'; }, 3000);
     setTimeout(() => el.remove(), 3500);
   }
-
-  // 注入动画 keyframe
-  const styleSheet = document.createElement('style');
-  styleSheet.textContent = `
-    @keyframes biliBatchFadeIn { from { opacity:0; transform:translateY(-10px); } to { opacity:1; transform:translateY(0); } }
-    @keyframes biliBatchSpin { to { transform:rotate(360deg); } }
-  `;
-  document.head.appendChild(styleSheet);
-
-  // ===========================
-  // API 模块
-  // ===========================
-
-  /**
-   * 获取稿件列表
-   * @param {number} status - 状态过滤: 1=进行中, 2=已通过, 3=未通过, 4=已删除（0 为不筛选）
-   * @param {number} page
-   * @param {number} pageSize
-   */
-  async function fetchArchiveList(status, page, pageSize) {
-    page = page || 1;
-    pageSize = pageSize || 50;
-    let url = `${CONFIG.API_BASE}/x/vu/web/archive/list?pn=${page}&ps=${pageSize}`;
-    if (status !== undefined && status !== 0) {
-      url += `&status=${status}`;
-    }
-    const resp = await fetch(url, {
-      method: 'GET',
-      credentials: 'include',
-      headers: { Accept: 'application/json' },
-    });
-    if (!resp.ok) throw new Error(`获取稿件列表失败: HTTP ${resp.status}`);
-    const json = await resp.json();
-    if (json.code !== 0) throw new Error(`获取稿件列表失败: ${json.message || '未知错误'}`);
-    return json.data;
-  }
-
-  /**
-   * 获取单个稿件编辑信息（尝试多个可能的 API 端点）
-   * @param {number} aid - 稿件 archive id
-   */
-  async function getArchiveEditInfo(aid) {
-    const endpoints = [
-      `/x/vu/web/archive/pre?aid=${aid}`,
-      `/x/vu/web/archive/info?aid=${aid}`,
-      `/x/vu/web/archive/view?aid=${aid}`,
-    ];
-
-    let lastError = null;
-    for (const path of endpoints) {
-      try {
-        const resp = await fetch(`${CONFIG.API_BASE}${path}`, {
-          method: 'GET',
-          credentials: 'include',
-          headers: { Accept: 'application/json' },
-        });
-        if (!resp.ok) continue;
-        const json = await resp.json();
-        if (json.code !== 0) continue;
-        logMsg(`稿件 #${aid} 编辑信息获取成功 (${path})`);
-        return json.data;
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    throw new Error(`获取稿件信息失败(aid=${aid}): ${lastError ? lastError.message : '所有端点均不可用'}`);
-  }
-
-  /**
-   * 保存/编辑稿件（尝试多个可能的 API 端点）
-   * @param {object} params - 稿件表单数据
-   */
-  async function saveArchive(params) {
-    const csrf = getCsrfToken();
-    if (!csrf) throw new Error('缺少 CSRF Token，请刷新页面重试');
-
-    // 构建表单数据
-    const formData = new URLSearchParams();
-    formData.append('csrf', csrf);
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== null) {
-        formData.append(key, String(value));
-      }
-    }
-
-    // 可能的后端保存端点
-    const endpoints = [
-      `${CONFIG.API_BASE}/x/vu/web/edit`,
-      `${CONFIG.API_BASE}/x/vu/web/archive/save`,
-    ];
-
-    let lastError = null;
-    for (const url of endpoints) {
-      try {
-        const resp = await fetch(url, {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            Accept: 'application/json',
-          },
-          body: formData.toString(),
-        });
-        if (!resp.ok) continue;
-        const json = await resp.json();
-        if (json.code !== 0) {
-          lastError = new Error(json.message || `API code=${json.code}`);
-          continue;
-        }
-        return json.data;
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    throw new Error(`保存稿件失败(aid=${params.aid}): ${lastError ? lastError.message : '所有端点均不可用'}`);
-  }
-
-  /**
-   * 上传封面图片
-   * @param {string} base64Data - base64 图片数据（含 data URI scheme 前缀）
-   * @returns {Promise<string>} 封面的 URL
-   */
-  async function uploadCover(base64Data) {
-    const csrf = getCsrfToken();
-    if (!csrf) throw new Error('缺少 CSRF Token');
-
-    if (!base64Data.startsWith('data:image/')) {
-      throw new Error('封面图片格式不正确，需要 data URI scheme');
-    }
-
-    const formData = new URLSearchParams();
-    formData.append('cover', base64Data);
-    formData.append('csrf', csrf);
-
-    const resp = await fetch(`${CONFIG.API_BASE}/x/vu/web/cover/up`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json',
-      },
-      body: formData.toString(),
-    });
-    if (!resp.ok) throw new Error(`封面上传失败: HTTP ${resp.status}`);
-    const json = await resp.json();
-    if (json.code !== 0) throw new Error(`封面上传失败: ${json.message || '未知错误'}`);
-    return json.data.url;
-  }
-
-  /**
-   * 获取推荐标签
-   * @param {string} title - 视频标题
-   * @param {number} typeid - 分区 ID
-   * @param {number} copyright - 1=原创, 2=转载
-   */
-  async function getRecommendedTags(title, typeid, copyright) {
-    const params = new URLSearchParams({ title, typeid: String(typeid), copyright: String(copyright || 1) });
-    const resp = await fetch(`${CONFIG.API_BASE}/x/vupre/web/tag/recommend?${params}`, {
-      method: 'GET',
-      credentials: 'include',
-      headers: { Accept: 'application/json' },
-    });
-    if (!resp.ok) throw new Error(`获取推荐标签失败: HTTP ${resp.status}`);
-    const json = await resp.json();
-    if (json.code !== 0) return [];
-    return (json.data && json.data.tags) ? json.data.tags : [];
-  }
-
-  /**
-   * 从 API 响应中提取稿件列表（兼容多种返回格式）
-   */
-  function extractArchivesFromData(data) {
-    if (!data) return [];
-    // 尝试常见的字段名
-    const candidates = [data.arc_audits, data.list, data.archives, data.items, data.result];
-    for (const arr of candidates) {
-      if (Array.isArray(arr) && arr.length > 0) return arr;
-    }
-    // 如果 data 本身就是数组
-    if (Array.isArray(data)) return data;
-    return [];
-  }
-
-  /**
-   * 尝试从页面 DOM 中抓取稿件信息（API 不可用时的降级方案）
-   */
-  function scrapeDraftsFromDOM() {
-    const drafts = [];
-    // B站稿件管理页常见的 DOM 选择器
-    const selectors = [
-      '.archive-item', '.video-item', '.draft-item', '.manage-item',
-      '[class*="archive"]', '[class*="draft"]', '[class*="video-item"]',
-      'tr[class*="item"]', '.list-item',
-    ];
-    for (const sel of selectors) {
-      try {
-        const els = document.querySelectorAll(sel);
-        if (els.length > 0) {
-          els.forEach((el, idx) => {
-            // 尝试提取 aid
-            const aidAttr = el.getAttribute('data-aid')
-              || el.getAttribute('data-id')
-              || el.getAttribute('data-avid');
-            const href = el.querySelector('a[href*="aid="]') || el.querySelector('a[href*="av"]');
-            let aid = aidAttr;
-            if (!aid && href) {
-              const m = href.getAttribute('href').match(/(?:aid|av)(\d+)/);
-              if (m) aid = m[1];
-            }
-            const titleEl = el.querySelector('[class*="title"], .title, h3, h4, a');
-            const title = titleEl ? titleEl.textContent.trim() : `稿件 #${idx + 1}`;
-            if (aid) {
-              drafts.push({ id: aid, aid: aid, title: title, _fromDOM: true });
-            }
-          });
-        }
-        if (drafts.length > 0) break;
-      } catch (_) { /* 选择器可能无效 */ }
-    }
-    return drafts;
-  }
-
-  /**
-   * 获取所有稿件（API 优先，DOM 降级，支持翻页）
-   */
-  async function fetchAllArchives() {
-    const allArchives = [];
-    const seenIds = new Set();
-    // status: 不传=全部, 1=进行中, 2=已通过, 3=未通过, 7=草稿
-    const statuses = [7, 1, undefined];
-
-    for (const status of statuses) {
-      let page = 1;
-      const maxPages = 5; // 每个状态最多翻 5 页（共 500 条）
-      while (page <= maxPages) {
-        try {
-          const data = await fetchArchiveList(status, page, 100);
-          const items = extractArchivesFromData(data);
-          if (items.length === 0) break;
-          for (const item of items) {
-            const itemId = item.id || item.aid;
-            if (!seenIds.has(itemId)) {
-              seenIds.add(itemId);
-              allArchives.push(item);
-            }
-          }
-          if (items.length < 100) break; // 最后一页
-          page++;
-        } catch (_) {
-          break;
-        }
-      }
-    }
-
-    // API 无结果时尝试 DOM 抓取
-    if (allArchives.length === 0) {
-      const domDrafts = scrapeDraftsFromDOM();
-      if (domDrafts.length > 0) {
-        logMsg('API 未返回稿件，已从页面 DOM 抓取到稿件列表');
-        return domDrafts;
-      }
-    }
-
-    return allArchives;
-  }
-
-  // ===========================
-  // UI 模块
-  // ===========================
-
-  /** 创建并注入整个浮动面板 */
-  function createPanel() {
-    // 如果已存在则移除重建
-    const existing = document.getElementById('bili-batch-panel');
-    if (existing) existing.remove();
-
-    const container = document.createElement('div');
-    container.id = 'bili-batch-panel';
-    Object.assign(container.style, {
-      position: 'fixed',
-      bottom: '20px',
-      right: '20px',
-      zIndex: CONFIG.PANEL_Z_INDEX,
-      width: '420px',
-      maxHeight: '650px',
-      background: CONFIG.BG_COLOR,
-      borderRadius: '12px',
-      boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
-      display: 'flex',
-      flexDirection: 'column',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
-      fontSize: '13px',
-      color: '#333',
-      overflow: 'hidden',
-    });
-    container.innerHTML = buildPanelHTML();
-    document.body.appendChild(container);
-
-    // 可拖拽
-    makeDraggable(container);
-
-    // 事件绑定延迟到 DOM 就绪
-    requestAnimationFrame(() => bindPanelEvents(container));
-    return container;
-  }
-
-  function buildPanelHTML() {
-    return `
-      <div id="bili-batch-header" style="
-        padding:14px 16px; background:${CONFIG.ACCENT_COLOR}; color:#fff; cursor:move;
-        display:flex; align-items:center; justify-content:space-between; user-select:none;">
-        <span style="font-size:15px; font-weight:600;">B站批量投稿设置</span>
-        <div style="display:flex; gap:8px;">
-          <button id="bili-batch-minimize" style="
-            background:none; border:none; color:#fff; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;
-          " title="最小化">&#x2014;</button>
-          <button id="bili-batch-close" style="
-            background:none; border:none; color:#fff; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;
-          " title="关闭">&#x2715;</button>
-        </div>
-      </div>
-      <div id="bili-batch-body" style="
-        padding:16px; overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:12px;">
-        <!-- 操作按钮区 -->
-        <div style="display:flex; flex-wrap:wrap; gap:8px;">
-          <button class="bili-batch-btn" data-action="refresh" style="
-            flex:1; min-width:80px; padding:8px 10px; border:1px solid #ddd; border-radius:6px;
-            background:#f5f5f5; cursor:pointer; font-size:12px; transition:all 0.2s;
-          ">&#x21bb; 刷新列表</button>
-          <button class="bili-batch-btn" data-action="selectAll" style="
-            flex:1; min-width:80px; padding:8px 10px; border:1px solid #ddd; border-radius:6px;
-            background:#f5f5f5; cursor:pointer; font-size:12px; transition:all 0.2s;
-          ">全选</button>
-          <button class="bili-batch-btn" data-action="deselectAll" style="
-            flex:1; min-width:80px; padding:8px 10px; border:1px solid #ddd; border-radius:6px;
-            background:#f5f5f5; cursor:pointer; font-size:12px; transition:all 0.2s;
-          ">取消全选</button>
-        </div>
-        <!-- 稿件列表 -->
-        <div id="bili-batch-list" style="
-          max-height:240px; overflow-y:auto; border:1px solid #e8e8e8; border-radius:6px;
-          min-height:60px; display:flex; align-items:center; justify-content:center; color:#999;
-        ">点击「刷新列表」加载稿件</div>
-        <!-- 统计 -->
-        <div id="bili-batch-stats" style="font-size:12px; color:#999; display:none;"></div>
-        <!-- 封面预览区 -->
-        <div id="bili-batch-cover-preview" style="display:none; text-align:center;">
-          <img id="bili-batch-cover-img" src="" style="
-            max-width:100%; max-height:160px; border-radius:8px; border:1px solid #e8e8e8;
-          ">
-          <div style="font-size:11px; color:#999; margin-top:4px;">封面预览</div>
-          <button class="bili-batch-btn" data-action="clearCover" style="
-            padding:4px 12px; border:1px solid #ff4d4f; border-radius:4px; color:#ff4d4f;
-            background:#fff; cursor:pointer; font-size:11px; margin-top:4px;
-          ">清除封面</button>
-        </div>
-        <!-- 进度条 -->
-        <div id="bili-batch-progress" style="display:none;">
-          <div style="font-size:12px; color:#666; margin-bottom:4px;">
-            <span id="bili-batch-progress-text">准备中...</span>
-          </div>
-          <div style="background:#e8e8e8; border-radius:4px; height:6px; overflow:hidden;">
-            <div id="bili-batch-progress-bar" style="
-              background:${CONFIG.ACCENT_COLOR}; height:100%; width:0%; transition:width 0.3s;
-            "></div>
-          </div>
-        </div>
-        <!-- 批量操作按钮 -->
-        <div id="bili-batch-actions" style="display:flex; flex-direction:column; gap:6px;">
-          <button class="bili-batch-action-btn" data-action="setPrivacy" style="
-            padding:10px; border:none; border-radius:6px; background:#ff9800; color:#fff;
-            cursor:pointer; font-size:13px; font-weight:500; transition:opacity 0.2s;
-          ">&#x1f512; 批量设为「仅自己可见」</button>
-          <button class="bili-batch-action-btn" data-action="setCover" style="
-            padding:10px; border:none; border-radius:6px; background:#4caf50; color:#fff;
-            cursor:pointer; font-size:13px; font-weight:500; transition:opacity 0.2s;
-          ">&#x1f5bc; 批量设置封面图片</button>
-          <button class="bili-batch-action-btn" data-action="setDeclaration" style="
-            padding:10px; border:none; border-radius:6px; background:#2196f3; color:#fff;
-            cursor:pointer; font-size:13px; font-weight:500; transition:opacity 0.2s;
-          ">&#x270d; 创作声明 →「内容无需标注」</button>
-          <button class="bili-batch-action-btn" data-action="setCategory" style="
-            padding:10px; border:none; border-radius:6px; background:#9c27b0; color:#fff;
-            cursor:pointer; font-size:13px; font-weight:500; transition:opacity 0.2s;
-          ">&#x1f3a8; 批量设置分区 →「绘画」</button>
-          <button class="bili-batch-action-btn" data-action="setTags" style="
-            padding:10px; border:none; border-radius:6px; background:#e91e63; color:#fff;
-            cursor:pointer; font-size:13px; font-weight:500; transition:opacity 0.2s;
-          ">&#x1f3f7; 批量设置标签（B站推荐）</button>
-          <button class="bili-batch-action-btn" data-action="setAll" style="
-            padding:12px; border:none; border-radius:6px; background:${CONFIG.ACCENT_COLOR}; color:#fff;
-            cursor:pointer; font-size:14px; font-weight:600; transition:opacity 0.2s;
-            margin-top:4px;
-          ">&#x26a1; 一键全部设置</button>
-        </div>
-        <!-- 日志区 -->
-        <details id="bili-batch-log-wrap" style="font-size:11px;">
-          <summary style="cursor:pointer; color:#999;">操作日志</summary>
-          <div id="bili-batch-log" style="
-            max-height:120px; overflow-y:auto; background:#f9f9f9; border-radius:4px;
-            padding:8px; margin-top:4px; font-family:monospace; white-space:pre-wrap;
-            word-break:break-all; color:#666;
-          "></div>
-        </details>
-      </div>`;
-  }
-
-  // ===========================
-  // 面板事件绑定
-  // ===========================
-
-  let draftList = [];         // 稿件数据
-  let selectedIds = new Set(); // 选中的 aid
-  let coverDataUrl = null;    // 用户选择的封面 base64
-  let recommendedTag = null;  // 推荐标签
-
-  function bindPanelEvents(container) {
-    // 头部按钮
-    container.querySelector('#bili-batch-close').onclick = () => {
-      container.remove();
-      notify('面板已关闭，刷新页面可重新打开', 'info');
-    };
-
-    let minimized = false;
-    const body = container.querySelector('#bili-batch-body');
-    container.querySelector('#bili-batch-minimize').onclick = () => {
-      minimized = !minimized;
-      body.style.display = minimized ? 'none' : '';
-      container.querySelector('#bili-batch-minimize').textContent = minimized ? '+' : '—';
-    };
-
-    // 操作用按钮：使用事件委托
-    body.addEventListener('click', async (e) => {
-      const btn = e.target.closest('button');
-      if (!btn) return;
-
-      const action = btn.dataset.action;
-      if (!action) return;
-
-      // 防止重复点击
-      if (btn.disabled) return;
-
-      switch (action) {
-        case 'refresh':
-          await handleRefresh();
-          break;
-        case 'selectAll':
-          selectAllDrafts(true);
-          break;
-        case 'deselectAll':
-          selectAllDrafts(false);
-          break;
-        case 'setPrivacy':
-          await handleSetPrivacy();
-          break;
-        case 'setCover':
-          await handleSetCover();
-          break;
-        case 'setDeclaration':
-          await handleSetDeclaration();
-          break;
-        case 'setCategory':
-          await handleSetCategory();
-          break;
-        case 'setTags':
-          await handleSetTagsAuto();
-          break;
-        case 'setAll':
-          await handleSetAll();
-          break;
-        case 'clearCover':
-          handleClearCover();
-          break;
-      }
-    });
-  }
-
-  function handleClearCover() {
-    coverDataUrl = null;
-    window._biliUploadedCoverUrl = null;
-    const preview = document.getElementById('bili-batch-cover-preview');
-    const img = document.getElementById('bili-batch-cover-img');
-    if (preview) preview.style.display = 'none';
-    if (img) img.src = '';
-    recommendedTag = null;
-    logMsg('已清除封面和缓存标签');
-    notify('封面已清除，可重新选择', 'info');
-  }
-
-  // ===========================
-  // 面板拖拽
-  // ===========================
-
-  function makeDraggable(panel) {
-    const header = panel.querySelector('#bili-batch-header');
-    if (!header) return;
-    let isDragging = false;
-    let startX, startY, startLeft, startTop;
-
-    header.addEventListener('mousedown', (e) => {
-      if (e.target.tagName === 'BUTTON') return;
-      isDragging = true;
-      startX = e.clientX;
-      startY = e.clientY;
-      const rect = panel.getBoundingClientRect();
-      startLeft = rect.left;
-      startTop = rect.top;
-      panel.style.transition = 'none';
-      document.body.style.userSelect = 'none';
-    });
-
-    document.addEventListener('mousemove', (e) => {
-      if (!isDragging) return;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-      panel.style.right = 'auto';
-      panel.style.bottom = 'auto';
-      panel.style.left = `${startLeft + dx}px`;
-      panel.style.top = `${Math.max(0, startTop + dy)}px`;
-    });
-
-    document.addEventListener('mouseup', () => {
-      if (!isDragging) return;
-      isDragging = false;
-      panel.style.transition = '';
-      document.body.style.userSelect = '';
-    });
-  }
-
-  // ===========================
-  // 列表管理
-  // ===========================
-
-  async function handleRefresh() {
-    const listEl = document.getElementById('bili-batch-list');
-    const statsEl = document.getElementById('bili-batch-stats');
-    listEl.innerHTML = '<span style="padding:20px;">正在拉取稿件列表...</span>';
-    statsEl.style.display = 'none';
-
-    try {
-      draftList = await fetchAllArchives();
-    } catch (err) {
-      listEl.innerHTML = `<span style="padding:20px; color:#ff4d4f;">加载失败: ${err.message}</span>`;
-      logMsg(`[ERROR] 获取稿件列表失败: ${err.message}`);
-      return;
-    }
-
-    if (draftList.length === 0) {
-      listEl.innerHTML = '<span style="padding:20px;">暂未找到待处理的稿件</span>';
-    } else {
-      selectedIds.clear();
-      // 默认全选
-      draftList.forEach((item) => {
-        const id = item.id || item.aid;
-        selectedIds.add(String(id));
-      });
-      renderDraftList();
-    }
-    statsEl.style.display = draftList.length > 0 ? 'block' : 'none';
-    statsEl.textContent = `共 ${draftList.length} 个稿件，已选 ${selectedIds.size} 个`;
-  }
-
-  function renderDraftList() {
-    const listEl = document.getElementById('bili-batch-list');
-    listEl.innerHTML = draftList
-      .map((item) => {
-        const id = item.id || item.aid;
-        const sid = String(id);
-        const checked = selectedIds.has(sid) ? 'checked' : '';
-        const title = item.title || item.archive_title || '(无标题)';
-        const statusText = (item.status === 7 || item.is_draft) ? '[草稿]'
-          : (item.status === 1 ? '[进行中]'
-          : (item.status === 2 ? '[已通过]'
-          : (item.status === 3 ? '[未通过]' : '')));
-        return `<label style="
-          display:flex; align-items:center; padding:6px 10px; border-bottom:1px solid #f0f0f0;
-          cursor:pointer; gap:8px; font-size:12px;
-        ">
-          <input type="checkbox" class="bili-draft-checkbox" data-id="${sid}" ${checked}
-            style="flex-shrink:0;">
-          <span style="color:#999; flex-shrink:0;">${statusText}</span>
-          <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
-            title="${escapeHtml(title)}">${escapeHtml(title)}</span>
-        </label>`;
-      })
-      .join('');
-
-    // 绑定 checkbox 事件
-    listEl.querySelectorAll('.bili-draft-checkbox').forEach((cb) => {
-      cb.addEventListener('change', (e) => {
-        const id = e.target.dataset.id;
-        if (e.target.checked) {
-          selectedIds.add(id);
-        } else {
-          selectedIds.delete(id);
-        }
-        updateStats();
-      });
-    });
-
-    updateStats();
-  }
-
-  function selectAllDrafts(select) {
-    if (select) {
-      draftList.forEach((item) => { selectedIds.add(String(item.id || item.aid)); });
-    } else {
-      selectedIds.clear();
-    }
-    renderDraftList();
-  }
-
-  function updateStats() {
-    const statsEl = document.getElementById('bili-batch-stats');
-    if (statsEl) {
-      statsEl.textContent = `共 ${draftList.length} 个稿件，已选 ${selectedIds.size} 个`;
-    }
-  }
-
-  function getSelectedArchives() {
-    return draftList.filter((item) => selectedIds.has(String(item.id || item.aid)));
-  }
-
-  // ===========================
-  // 进度 / 日志
-  // ===========================
-
-  function showProgress(current, total, text) {
-    const wrap = document.getElementById('bili-batch-progress');
-    const bar = document.getElementById('bili-batch-progress-bar');
-    const txt = document.getElementById('bili-batch-progress-text');
-    if (wrap) wrap.style.display = total > 0 ? 'block' : 'none';
-    if (bar) bar.style.width = total > 0 ? `${Math.round((current / total) * 100)}%` : '0%';
-    if (txt) txt.textContent = text || `${current} / ${total}`;
-  }
-
-  function hideProgress() {
-    const wrap = document.getElementById('bili-batch-progress');
-    if (wrap) wrap.style.display = 'none';
-  }
-
   function logMsg(msg) {
     const el = document.getElementById('bili-batch-log');
     if (!el) return;
@@ -734,510 +59,557 @@
     el.scrollTop = el.scrollHeight;
   }
 
-  function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
+  // ===========================
+  // 全局状态
+  // ===========================
+  let selectedCoverFile = null;
+  let selectedCoverBase64 = null;
+  let processing = false;
+  let abortFlag = false;
+
+  // ===========================
+  // 表单操作函数（基于实际 DOM 结构）
+  // ===========================
+
+  /** 获取任务列表 */
+  function getTasks() {
+    return document.querySelectorAll('.task');
+  }
+
+  /** 点击选中一个任务 */
+  function selectTask(taskEl) {
+    taskEl.click();
+    // 一些任务可能已经有 task-selected 类
+  }
+
+  /** 设置创作声明 →「内容无需标注」
+   *  原理: 点击 .bcc-select-input-inner 打开下拉，然后点击 .bcc-select-option-list 中的对应项 */
+  async function setDeclaration(text) {
+    // 检查是否已经选中
+    const current = document.querySelector('.bcc-select-input-inner');
+    if (!current) { logMsg('  [WARN] 未找到创作声明选择器'); return false; }
+    if (current.value === text) { logMsg('  创作声明已是「' + text + '」，跳过'); return true; }
+
+    logMsg('  设置创作声明...');
+    // 方式1: 直接点击 bcc-select 打开下拉
+    const bccSelect = document.querySelector('.bcc-select');
+    if (bccSelect) bccSelect.click();
+
+    await delay(400);
+
+    // 在 .bcc-select-option-list 中找目标（它在 DOM 里，点击 input 后会显示为下拉）
+    const optionList = document.querySelector('.bcc-select-option-list');
+    if (optionList) {
+      const items = optionList.querySelectorAll('li');
+      for (const li of items) {
+        if (li.textContent.trim() === text) {
+          li.click();
+          logMsg('  创作声明 →「' + text + '」');
+          await delay(CONFIG.DELAY_AFTER_CLICK);
+          return true;
+        }
+      }
+    }
+
+    // 方式2: 查找全局 .el-select-dropdown__item
+    await delay(200);
+    const globalItems = document.querySelectorAll('.el-select-dropdown__item');
+    for (const item of globalItems) {
+      if (item.textContent.trim() === text && !item.classList.contains('is-disabled')) {
+        item.click();
+        logMsg('  创作声明 →「' + text + '」(全局下拉)');
+        await delay(CONFIG.DELAY_AFTER_CLICK);
+        return true;
+      }
+    }
+
+    logMsg('  [WARN] 未找到创作声明选项「' + text + '」');
+    return false;
+  }
+
+  /** 设置可见范围 →「仅自己可见」
+   *  原理: 找到 .check-radio-v2-name 包含目标文字的元素，点击其父级 radio */
+  async function setPrivacy(text) {
+    const labels = document.querySelectorAll('.check-radio-v2-name');
+    for (const label of labels) {
+      if (label.textContent.trim() === text) {
+        // 往上找到可点击的 radio wrapper
+        let clickable = label.closest('[class*="check-radio"]') ||
+                        label.closest('label') ||
+                        label.closest('[class*="radio"]');
+        if (clickable) {
+          // 检查是否已选中
+          if (clickable.classList.contains('checked') ||
+              clickable.classList.contains('is-checked') ||
+              clickable.classList.contains('active') ||
+              clickable.classList.contains('selected')) {
+            logMsg('  可见范围已是「' + text + '」，跳过');
+            return true;
+          }
+          clickable.click();
+          logMsg('  可见范围 →「' + text + '」');
+          await delay(CONFIG.DELAY_AFTER_CLICK);
+          return true;
+        }
+      }
+    }
+    logMsg('  [WARN] 未找到可见范围选项「' + text + '」');
+    return false;
+  }
+
+  /** 设置标签 — 点击推荐标签 hot-tag-container */
+  async function setTagsAuto() {
+    const hotTags = document.querySelectorAll('.hot-tag-container');
+    if (hotTags.length === 0) {
+      // 尝试手动输入
+      const tagInput = document.querySelector('input[placeholder*="标签"]');
+      if (!tagInput) { logMsg('  [WARN] 未找到标签输入'); return false; }
+      logMsg('  未找到推荐标签，手动输入「绘画」...');
+      tagInput.focus();
+      tagInput.value = '绘画';
+      tagInput.dispatchEvent(new Event('input', { bubbles: true }));
+      tagInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+      await delay(500);
+      return true;
+    }
+
+    // 点击第一个未选中的推荐标签
+    for (const tag of hotTags) {
+      if (tag.classList.contains('hot-tag-container-selected')) {
+        logMsg('  标签「' + tag.textContent.trim() + '」已选中，跳过');
+        continue;
+      }
+      tag.click();
+      logMsg('  标签 →「' + tag.textContent.trim() + '」');
+      await delay(400);
+      return true;
+    }
+
+    logMsg('  所有推荐标签均已选中');
+    return true;
+  }
+
+  /** 设置封面 — 点开封面编辑器，通过 DataTransfer 注入文件 */
+  async function setCover(file) {
+    if (!file) { logMsg('  [WARN] 未选择封面文件'); return false; }
+
+    // 1. 点开封面编辑器
+    let editText = document.querySelector('.edit-text');
+    if (editText) {
+      editText.click();
+      await delay(800);
+    }
+
+    // 2. 查找封面编辑器中的 file input
+    // 封面编辑器面板通常含 .cover-editor-panel-select 或 .bcc-upload
+    let fileInput = null;
+    const uploadWrappers = document.querySelectorAll('.bcc-upload-wrapper');
+    for (const w of uploadWrappers) {
+      const inp = w.querySelector('input[type="file"]');
+      if (inp) { fileInput = inp; break; }
+    }
+
+    if (!fileInput) {
+      // 回退：任意 file input
+      const allInputs = document.querySelectorAll('input[type="file"]');
+      for (const inp of allInputs) {
+        const parentClass = inp.parentElement?.className || '';
+        if (parentClass.includes('upload') || parentClass.includes('cover')) {
+          fileInput = inp; break;
+        }
+      }
+    }
+
+    if (!fileInput) {
+      logMsg('  [WARN] 未找到封面上传 input，尝试关闭编辑器重试');
+      document.body.click();
+      await delay(300);
+      return false;
+    }
+
+    // 3. 注入文件
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      fileInput.files = dt.files;
+      fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+      fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+      logMsg('  封面已注入: ' + file.name);
+    } catch (err) {
+      logMsg('  [ERROR] 封面注入失败: ' + err.message);
+      return false;
+    }
+
+    // 4. 等待上传完成，然后关闭编辑器
+    await delay(1500);
+    // 尝试关闭封面编辑器
+    const closeBtns = document.querySelectorAll('[class*="close"], .icon-close, [class*="cancel"]');
+    for (const btn of closeBtns) {
+      if (btn.offsetHeight > 0) { btn.click(); break; }
+    }
+    document.body.click();
+    await delay(300);
+
+    return true;
+  }
+
+  /** 设置分区（尽力而为 — 当前页面分区机制未完全确认） */
+  async function setCategoryIfNeeded() {
+    // 检查当前分区
+    const inserted = document.querySelector('.select-item-cont-inserted');
+    if (inserted && inserted.textContent.trim().includes('绘画')) {
+      logMsg('  分区已是「绘画」，跳过');
+      return true;
+    }
+
+    // 如果不是绘画，尝试点击 selector-container 打开下拉
+    const selector = document.querySelector('.selector-container');
+    if (!selector) { logMsg('  [WARN] 未找到分区选择器'); return false; }
+
+    selector.click();
+    await delay(500);
+
+    // 尝试各种可能的下拉选项
+    const options = document.querySelectorAll('.el-select-dropdown__item, .el-popper li, [class*="option-item"], .select-item');
+    for (const opt of options) {
+      if (opt.textContent.trim().includes('绘画') && !opt.classList.contains('is-disabled')) {
+        opt.click();
+        logMsg('  分区 →「' + opt.textContent.trim() + '」');
+        await delay(CONFIG.DELAY_AFTER_CLICK);
+        return true;
+      }
+    }
+
+    logMsg('  [WARN] 分区不是绘画但未找到绘画选项，已跳过');
+    document.body.click();
+    return false;
   }
 
   // ===========================
-  // 批量操作
+  // 批量处理主流程
   // ===========================
 
-  /**
-   * 通用批量处理函数
-   * @param {Array} archives - 选中的稿件
-   * @param {Function} processor - 处理单个稿件的异步函数 (archive) => Promise
-   * @param {string} actionName - 操作名称
-   */
-  async function batchProcess(archives, processor, actionName) {
-    if (archives.length === 0) {
-      notify('请先选择要操作的稿件', 'warning');
+  async function processSingleTask(task, file, index, total) {
+    const title = task.getAttribute('title') || ('任务 #' + (index + 1));
+    logMsg(`[${index + 1}/${total}] 处理「${title}」...`);
+
+    // 1. 选中任务
+    logMsg('  选中任务...');
+    selectTask(task);
+    await delay(CONFIG.DELAY_AFTER_CLICK);
+
+    // 2. 创作声明
+    await setDeclaration(CONFIG.DECLARATION_TEXT);
+
+    // 3. 可见范围
+    await setPrivacy(CONFIG.PRIVACY_TEXT);
+
+    // 4. 分区（如果还不是绘画）
+    await setCategoryIfNeeded();
+
+    // 5. 标签
+    await setTagsAuto();
+
+    // 6. 封面
+    if (file) {
+      await setCover(file);
+    } else {
+      logMsg('  封面: 未选择，跳过');
+    }
+  }
+
+  async function processAllTasks() {
+    if (processing) { notify('正在处理中...', 'warning'); return; }
+
+    const tasks = getTasks();
+    if (tasks.length === 0) { notify('未找到视频任务', 'error'); return; }
+    if (!selectedCoverFile) {
+      notify('请先选择封面图片', 'warning');
       return;
     }
 
-    let successCount = 0;
-    let failCount = 0;
-    const total = archives.length;
+    processing = true;
+    abortFlag = false;
+    disableButtons(true);
 
-    logMsg(`==== 开始批量操作: ${actionName} (共 ${total} 个) ====`);
-    notify(`开始${actionName}，共 ${total} 个稿件`, 'info');
-    showProgress(0, total, `0 / ${total}`);
+    let ok = 0, fail = 0;
+    const total = tasks.length;
+    const coverFile = selectedCoverFile;
+
+    logMsg('==== 开始批量处理 ' + total + ' 个视频 ====');
+    notify('开始批量处理 ' + total + ' 个视频', 'info');
+    showProgress(0, total, '0 / ' + total);
 
     for (let i = 0; i < total; i++) {
-      const archive = archives[i];
-      const id = archive.id || archive.aid;
-      const title = archive.title || archive.archive_title || '(无标题)';
-      const current = i + 1;
-
-      showProgress(current, total, `${current} / ${total} — ${escapeHtml(title)}`);
+      if (abortFlag) { logMsg('用户中止'); break; }
+      const cur = i + 1;
+      showProgress(cur, total, cur + ' / ' + total + ' — ' + escapeHtml(tasks[i].getAttribute('title') || ''));
 
       try {
-        await processor(archive);
-        successCount++;
-        logMsg(`[OK] #${id} ${title}`);
+        await processSingleTask(tasks[i], coverFile, i, total);
+        ok++;
+        logMsg('  [OK]');
       } catch (err) {
-        failCount++;
-        logMsg(`[FAIL] #${id} ${title}: ${err.message}`);
+        fail++;
+        logMsg('  [FAIL] ' + err.message);
       }
 
-      if (current < total) {
-        await delay(CONFIG.DELAY_MS);
+      if (cur < total && !abortFlag) {
+        await delay(CONFIG.DELAY_BETWEEN_TASKS);
       }
     }
 
+    processing = false;
+    disableButtons(false);
     hideProgress();
-    const msg = `${actionName}完成: 成功 ${successCount}, 失败 ${failCount}`;
-    logMsg(`==== ${msg} ====`);
-    notify(msg, failCount > 0 ? 'warning' : 'success');
-
-    // 刷新列表
-    await handleRefresh();
+    const msg = '完成: 成功 ' + ok + ', 失败 ' + fail;
+    logMsg('==== ' + msg + ' ====');
+    notify(msg, fail > 0 ? 'warning' : 'success');
   }
 
-  // ---- 单个操作处理器 ----
+  // ===========================
+  // 单项操作入口
+  // ===========================
 
-  async function processSetPrivacy(archive) {
-    const aid = archive.id || archive.aid;
-    logMsg(`获取稿件 #${aid} 编辑信息...`);
-    const info = await getArchiveEditInfo(aid);
-    const archiveData = (info && info.archive) ? info.archive : info;
+  async function processDeclarationOnly() {
+    const tasks = getTasks();
+    if (tasks.length === 0) { notify('未找到视频任务', 'error'); return; }
+    processing = true; abortFlag = false; disableButtons(true);
+    let ok = 0, fail = 0;
+    logMsg('==== 仅设置创作声明 ====');
+    for (let i = 0; i < tasks.length && !abortFlag; i++) {
+      showProgress(i + 1, tasks.length, (i + 1) + '/' + tasks.length);
+      selectTask(tasks[i]); await delay(800);
+      (await setDeclaration(CONFIG.DECLARATION_TEXT)) ? ok++ : fail++;
+      if (i < tasks.length - 1) await delay(CONFIG.DELAY_BETWEEN_TASKS);
+    }
+    processing = false; disableButtons(false); hideProgress();
+    notify('创作声明: 成功' + ok + ', 失败' + fail, fail > 0 ? 'warning' : 'success');
+  }
 
-    // 构建保存参数（基于获取到的原始数据，仅修改必要字段）
-    const params = { aid: aid };
+  async function processPrivacyOnly() {
+    const tasks = getTasks();
+    if (tasks.length === 0) { notify('未找到视频任务', 'error'); return; }
+    processing = true; abortFlag = false; disableButtons(true);
+    let ok = 0, fail = 0;
+    logMsg('==== 仅设置可见范围 ====');
+    for (let i = 0; i < tasks.length && !abortFlag; i++) {
+      showProgress(i + 1, tasks.length, (i + 1) + '/' + tasks.length);
+      selectTask(tasks[i]); await delay(800);
+      (await setPrivacy(CONFIG.PRIVACY_TEXT)) ? ok++ : fail++;
+      if (i < tasks.length - 1) await delay(CONFIG.DELAY_BETWEEN_TASKS);
+    }
+    processing = false; disableButtons(false); hideProgress();
+    notify('可见范围: 成功' + ok + ', 失败' + fail, fail > 0 ? 'warning' : 'success');
+  }
 
-    // 拷贝现有关键字段
-    if (archiveData) {
-      for (const key of ['title', 'tid', 'copyright', 'cover', 'desc', 'tag', 'no_reprint', 'source', 'dynamic', 'videos', 'subtitle', 'tid_v2']) {
-        if (archiveData[key] !== undefined) {
-          params[key] = archiveData[key];
-        }
+  async function processTagsOnly() {
+    const tasks = getTasks();
+    if (tasks.length === 0) { notify('未找到视频任务', 'error'); return; }
+    processing = true; abortFlag = false; disableButtons(true);
+    let ok = 0, fail = 0;
+    logMsg('==== 仅设置标签 ====');
+    for (let i = 0; i < tasks.length && !abortFlag; i++) {
+      showProgress(i + 1, tasks.length, (i + 1) + '/' + tasks.length);
+      selectTask(tasks[i]); await delay(800);
+      (await setTagsAuto()) ? ok++ : fail++;
+      if (i < tasks.length - 1) await delay(CONFIG.DELAY_BETWEEN_TASKS);
+    }
+    processing = false; disableButtons(false); hideProgress();
+    notify('标签: 成功' + ok + ', 失败' + fail, fail > 0 ? 'warning' : 'success');
+  }
+
+  // ===========================
+  // UI
+  // ===========================
+
+  function createPanel() {
+    const existing = document.getElementById('bili-batch-panel');
+    if (existing) existing.remove();
+
+    const panel = document.createElement('div');
+    panel.id = 'bili-batch-panel';
+    Object.assign(panel.style, {
+      position: 'fixed', bottom: '20px', right: '20px', zIndex: CONFIG.PANEL_Z_INDEX,
+      width: '360px', maxHeight: '550px', background: CONFIG.BG_COLOR,
+      borderRadius: '12px', boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+      display: 'flex', flexDirection: 'column', fontFamily: 'sans-serif',
+      fontSize: '13px', color: '#333', overflow: 'hidden',
+    });
+    panel.innerHTML = `
+      <div id="bili-batch-header" style="padding:10px 14px; background:${CONFIG.ACCENT_COLOR}; color:#fff; cursor:move; display:flex; align-items:center; justify-content:space-between; user-select:none;">
+        <span style="font-size:14px; font-weight:600;">B站批量投稿设置 v2.1</span>
+        <div style="display:flex; gap:6px;">
+          <button id="bili-batch-min" style="background:none; border:none; color:#fff; cursor:pointer; font-size:16px;">–</button>
+          <button id="bili-batch-close" style="background:none; border:none; color:#fff; cursor:pointer; font-size:16px;">✕</button>
+        </div>
+      </div>
+      <div id="bili-batch-body" style="padding:12px; overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:8px;">
+        <div id="bili-batch-stats" style="font-size:12px; color:#999; text-align:center;"></div>
+        <div id="bili-batch-cover-preview" style="display:none; text-align:center;">
+          <img id="bili-batch-cover-img" src="" style="max-width:100%; max-height:100px; border-radius:6px; border:1px solid #e8e8e8;">
+          <button class="bili-op" data-action="clearCover" style="font-size:11px; color:#ff4d4f; background:none; border:none; cursor:pointer; margin-top:4px;">清除封面</button>
+        </div>
+        <div id="bili-batch-progress" style="display:none;">
+          <div style="font-size:11px; color:#666; margin-bottom:3px;"><span id="bili-batch-progress-text"></span></div>
+          <div style="background:#e8e8e8; border-radius:3px; height:5px;"><div id="bili-batch-progress-bar" style="background:${CONFIG.ACCENT_COLOR}; height:100%; width:0%;"></div></div>
+          <button class="bili-op" data-action="abort" style="font-size:11px; color:#ff4d4f; background:none; border:1px solid #ff4d4f; border-radius:4px; padding:2px 10px; margin-top:4px; cursor:pointer;">中止</button>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:5px;">
+          <button class="bili-act" data-action="setCover" style="padding:8px; border:none; border-radius:6px; background:#4caf50; color:#fff; cursor:pointer; font-size:12px; font-weight:500;">选择封面图片</button>
+          <button class="bili-act" data-action="setAll" style="padding:10px; border:none; border-radius:6px; background:${CONFIG.ACCENT_COLOR}; color:#fff; cursor:pointer; font-size:13px; font-weight:600;">一键全部设置</button>
+          <div style="display:flex; gap:5px; flex-wrap:wrap;">
+            <button class="bili-act" data-action="setDeclaration" style="flex:1; min-width:60px; padding:6px; border:none; border-radius:5px; background:#2196f3; color:#fff; cursor:pointer; font-size:11px;">仅声明</button>
+            <button class="bili-act" data-action="setPrivacy" style="flex:1; min-width:60px; padding:6px; border:none; border-radius:5px; background:#ff9800; color:#fff; cursor:pointer; font-size:11px;">仅隐私</button>
+            <button class="bili-act" data-action="setTags" style="flex:1; min-width:60px; padding:6px; border:none; border-radius:5px; background:#e91e63; color:#fff; cursor:pointer; font-size:11px;">仅标签</button>
+          </div>
+        </div>
+        <details style="font-size:10px;">
+          <summary style="cursor:pointer; color:#999;">操作日志</summary>
+          <div id="bili-batch-log" style="max-height:100px; overflow-y:auto; background:#f9f9f9; border-radius:4px; padding:6px; margin-top:4px; font-family:monospace; white-space:pre-wrap; word-break:break-all; color:#666;"></div>
+        </details>
+      </div>`;
+    document.body.appendChild(panel);
+    makeDraggable(panel);
+    requestAnimationFrame(() => bindEvents(panel));
+  }
+
+  function bindEvents(panel) {
+    panel.querySelector('#bili-batch-close').onclick = () => {
+      panel.remove(); notify('面板已关闭，刷新页面可重新打开', 'info');
+    };
+    let minimized = false;
+    const body = panel.querySelector('#bili-batch-body');
+    panel.querySelector('#bili-batch-min').onclick = () => {
+      minimized = !minimized;
+      body.style.display = minimized ? 'none' : '';
+      panel.querySelector('#bili-batch-min').textContent = minimized ? '+' : '–';
+    };
+
+    body.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button');
+      if (!btn || btn.disabled) return;
+      const action = btn.dataset.action;
+      switch (action) {
+        case 'setAll': await processAllTasks(); break;
+        case 'setCover': await pickCover(); break;
+        case 'setDeclaration': await processDeclarationOnly(); break;
+        case 'setPrivacy': await processPrivacyOnly(); break;
+        case 'setTags': await processTagsOnly(); break;
+        case 'clearCover': clearCover(); break;
+        case 'abort': abortFlag = true; break;
       }
-    }
-
-    // 设置为仅自己可见（通过 state 或 publish_type）
-    // B站内部: 存为草稿时 publish=0, 设置隐私状态
-    // 这里的 exact 参数名需要根据实际 API 调整
-    params.publish = 0; // 不发布，仅保存为草稿
-    // 尝试多种可能的参数名
-    params.state = 'self_only';
-    // 某些版本的 API 可能使用 is_only_up 或其他参数
-    params.is_self = 1;
-
-    logMsg(`保存稿件 #${aid}「仅自己可见」...`);
-    await saveArchive(params);
-  }
-
-  async function processSetCover(archive) {
-    const aid = archive.id || archive.aid;
-    if (!coverDataUrl) throw new Error('尚未选择封面图片');
-
-    // 如果封面 URL 还没有上传，先上传
-    // （封面只需上传一次，在 handleSetCover 中预先处理）
-    // 这里直接用已上传的封面 URL
-
-    logMsg(`获取稿件 #${aid} 编辑信息...`);
-    const info = await getArchiveEditInfo(aid);
-    const archiveData = (info && info.archive) ? info.archive : info;
-
-    const params = { aid: aid };
-    if (archiveData) {
-      for (const key of ['title', 'tid', 'copyright', 'desc', 'tag', 'no_reprint', 'source', 'dynamic', 'videos', 'subtitle', 'tid_v2']) {
-        if (archiveData[key] !== undefined) {
-          params[key] = archiveData[key];
-        }
-      }
-    }
-    params.publish = 0;
-    params.cover = window._biliUploadedCoverUrl; // 全局变量，由 handleSetCover 设置
-
-    logMsg(`保存稿件 #${aid} 封面...`);
-    await saveArchive(params);
-  }
-
-  async function processSetDeclaration(archive) {
-    const aid = archive.id || archive.aid;
-    logMsg(`获取稿件 #${aid} 编辑信息...`);
-    const info = await getArchiveEditInfo(aid);
-    const archiveData = (info && info.archive) ? info.archive : info;
-
-    const params = { aid: aid };
-    if (archiveData) {
-      for (const key of ['title', 'tid', 'copyright', 'cover', 'desc', 'tag', 'no_reprint', 'source', 'dynamic', 'videos', 'subtitle', 'tid_v2']) {
-        if (archiveData[key] !== undefined) {
-          params[key] = archiveData[key];
-        }
-      }
-    }
-    params.publish = 0;
-
-    // 创作声明：内容无需标注
-    // 清除所有可能的声明字段
-    params.copyright = CONFIG.COPYRIGHT;
-    params.no_reprint = CONFIG.NO_REPRINT;
-    // B站创作声明相关字段（根据实际 API 可能需要调整）
-    // 内容无需标注 = 不勾选任何 AI生成/危险行为/商业推广 等
-    params.is_ai = 0;
-    params.is_risk = 0;
-    params.is_business = 0;
-
-    logMsg(`保存稿件 #${aid}「内容无需标注」...`);
-    await saveArchive(params);
-  }
-
-  async function processSetCategory(archive) {
-    const aid = archive.id || archive.aid;
-    logMsg(`获取稿件 #${aid} 编辑信息...`);
-    const info = await getArchiveEditInfo(aid);
-    const archiveData = (info && info.archive) ? info.archive : info;
-
-    const params = { aid: aid };
-    if (archiveData) {
-      for (const key of ['title', 'copyright', 'cover', 'desc', 'tag', 'no_reprint', 'source', 'dynamic', 'videos', 'subtitle']) {
-        if (archiveData[key] !== undefined) {
-          params[key] = archiveData[key];
-        }
-      }
-    }
-    params.publish = 0;
-    params.tid = CONFIG.CATEGORY_TID.DRAWING; // 绘画 = 162
-
-    logMsg(`保存稿件 #${aid} 分区→绘画 (tid=162)...`);
-    await saveArchive(params);
-  }
-
-  async function processSetTags(archive) {
-    const aid = archive.id || archive.aid;
-    if (!recommendedTag) throw new Error('尚未获取推荐标签，请先执行「设置标签」操作');
-
-    logMsg(`获取稿件 #${aid} 编辑信息...`);
-    const info = await getArchiveEditInfo(aid);
-    const archiveData = (info && info.archive) ? info.archive : info;
-
-    const params = { aid: aid };
-    if (archiveData) {
-      for (const key of ['title', 'tid', 'copyright', 'cover', 'desc', 'no_reprint', 'source', 'dynamic', 'videos', 'subtitle', 'tid_v2']) {
-        if (archiveData[key] !== undefined) {
-          params[key] = archiveData[key];
-        }
-      }
-    }
-    params.publish = 0;
-    params.tag = recommendedTag; // 使用推荐标签
-
-    logMsg(`保存稿件 #${aid} 标签→「${recommendedTag}」...`);
-    await saveArchive(params);
-  }
-
-  // ---- 操作入口 ----
-
-  async function handleSetPrivacy() {
-    const selected = getSelectedArchives();
-    disableAllButtons(true);
-    try {
-      await batchProcess(selected, processSetPrivacy, '设为「仅自己可见」');
-    } finally {
-      disableAllButtons(false);
-    }
-  }
-
-  async function handleSetCover() {
-    if (!coverDataUrl) {
-      // 触发文件选择
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'image/jpeg,image/png,image/bmp,image/webp';
-      input.style.display = 'none';
-      document.body.appendChild(input);
-
-      const fileSelected = new Promise((resolve, reject) => {
-        input.onchange = async (e) => {
-          const file = e.target.files[0];
-          if (!file) { reject(new Error('未选择文件')); return; }
-          // 检查文件大小 (≤5MB)
-          if (file.size > 5 * 1024 * 1024) {
-            reject(new Error('图片大小不能超过 5MB'));
-            return;
-          }
-          // 转为 base64
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(new Error('读取图片失败'));
-          reader.readAsDataURL(file);
-        };
-      });
-
-      input.click();
-
-      try {
-        coverDataUrl = await fileSelected;
-        input.remove();
-      } catch (err) {
-        input.remove();
-        notify(err.message, 'error');
-        return;
-      }
-
-      // 显示预览
-      const previewWrap = document.getElementById('bili-batch-cover-preview');
-      const previewImg = document.getElementById('bili-batch-cover-img');
-      previewImg.src = coverDataUrl;
-      previewWrap.style.display = 'block';
-
-      notify('封面图片已选择，请再次点击「批量设置封面图片」确认上传', 'info');
-      return;
-    }
-
-    // 确认后上传封面并批量应用
-    const selected = getSelectedArchives();
-    if (selected.length === 0) {
-      notify('请先选择要操作的稿件', 'warning');
-      return;
-    }
-
-    disableAllButtons(true);
-    try {
-      // 上传一次封面，拿到 URL
-      logMsg('正在上传封面图片...');
-      const coverUrl = await uploadCover(coverDataUrl);
-      logMsg(`封面上传成功: ${coverUrl}`);
-      window._biliUploadedCoverUrl = coverUrl;
-
-      await batchProcess(selected, processSetCover, '设置封面');
-    } catch (err) {
-      logMsg(`[ERROR] 封面上传失败: ${err.message}`);
-      notify(`封面上传失败: ${err.message}`, 'error');
-    } finally {
-      disableAllButtons(false);
-      // 不清除 coverDataUrl，以便用户可以对其他稿件也应用同一封面
-    }
-  }
-
-  async function handleSetDeclaration() {
-    const selected = getSelectedArchives();
-    disableAllButtons(true);
-    try {
-      await batchProcess(selected, processSetDeclaration, '创作声明→「内容无需标注」');
-    } finally {
-      disableAllButtons(false);
-    }
-  }
-
-  async function handleSetCategory() {
-    const selected = getSelectedArchives();
-    disableAllButtons(true);
-    try {
-      await batchProcess(selected, processSetCategory, '分区→「绘画」');
-    } finally {
-      disableAllButtons(false);
-    }
-  }
-
-  async function handleSetTagsAuto() {
-    const selected = getSelectedArchives();
-    if (selected.length === 0) {
-      notify('请先选择要操作的稿件', 'warning');
-      return;
-    }
-
-    // 取第一个选中稿件的标题获取推荐标签
-    const first = selected[0];
-    const title = first.title || first.archive_title || '';
-    logMsg(`正在获取推荐标签 (title="${title}", typeid=162)...`);
-
-    disableAllButtons(true);
-    try {
-      const tags = await getRecommendedTags(title, CONFIG.CATEGORY_TID.DRAWING, CONFIG.COPYRIGHT);
-      if (!tags || tags.length === 0) {
-        throw new Error('B站未返回推荐标签，请手动在编辑页面设置');
-      }
-      recommendedTag = tags[0].tag || tags[0]; // 取第一个推荐标签
-      logMsg(`自动选择推荐标签: 「${recommendedTag}」`);
-
-      await batchProcess(selected, processSetTags, `设置标签→「${recommendedTag}」`);
-    } catch (err) {
-      logMsg(`[ERROR] ${err.message}`);
-      notify(err.message, 'error');
-    } finally {
-      disableAllButtons(false);
-    }
-  }
-
-  // 一键设置（分步骤顺序执行）
-  async function handleSetAll() {
-    if (getSelectedArchives().length === 0) {
-      notify('请先选择要操作的稿件', 'warning');
-      return;
-    }
-
-    logMsg('==== 一键全部设置开始 ====');
-
-    // 1) 封面 — 先选图
-    if (!coverDataUrl) {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'image/jpeg,image/png,image/bmp,image/webp';
-      input.style.display = 'none';
-      document.body.appendChild(input);
-
-      const fileSelected = new Promise((resolve, reject) => {
-        input.onchange = async (e) => {
-          const file = e.target.files[0];
-          if (!file) { reject(new Error('未选择文件')); return; }
-          if (file.size > 5 * 1024 * 1024) { reject(new Error('图片大小不能超过 5MB')); return; }
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(new Error('读取图片失败'));
-          reader.readAsDataURL(file);
-        };
-      });
-
-      input.click();
-
-      try {
-        coverDataUrl = await fileSelected;
-        input.remove();
-      } catch (err) {
-        input.remove();
-        notify(err.message, 'error');
-        return;
-      }
-
-      // 显示预览
-      document.getElementById('bili-batch-cover-img').src = coverDataUrl;
-      document.getElementById('bili-batch-cover-preview').style.display = 'block';
-      notify('请确认封面预览无误后，再次点击「一键全部设置」继续', 'info');
-      return;
-    }
-
-    // 2) 先获取推荐标签
-    const selected = getSelectedArchives();
-    const first = selected[0];
-    const title = first.title || first.archive_title || '';
-    logMsg(`获取推荐标签 (title="${title}")...`);
-
-    disableAllButtons(true);
-    try {
-      let tags = [];
-      try {
-        tags = await getRecommendedTags(title, CONFIG.CATEGORY_TID.DRAWING, CONFIG.COPYRIGHT);
-      } catch (_) { /* 忽略 */ }
-      if (tags && tags.length > 0) {
-        recommendedTag = tags[0].tag || tags[0];
-        logMsg(`推荐标签: 「${recommendedTag}」`);
-      } else {
-        logMsg('未获取到推荐标签，将跳过标签设置');
-      }
-
-      // 3) 上传封面（如果尚未上传）
-      let coverUrl = window._biliUploadedCoverUrl || null;
-      if (coverDataUrl && !coverUrl) {
-        logMsg('上传封面图片...');
-        coverUrl = await uploadCover(coverDataUrl);
-        window._biliUploadedCoverUrl = coverUrl;
-        logMsg(`封面 URL: ${coverUrl}`);
-      } else if (coverUrl) {
-        logMsg('使用已上传的封面 URL，跳过重复上传');
-      }
-
-      // 4) 逐个处理每个稿件
-      const archives = selected;
-      const total = archives.length;
-      let successCount = 0;
-      let failCount = 0;
-
-      logMsg(`开始逐稿件设置 (共 ${total} 个)...`);
-      showProgress(0, total, `0 / ${total}`);
-
-      for (let i = 0; i < total; i++) {
-        const archive = archives[i];
-        const aid = archive.id || archive.aid;
-        const arcTitle = archive.title || archive.archive_title || '(无标题)';
-        const current = i + 1;
-        showProgress(current, total, `${current} / ${total} — ${escapeHtml(arcTitle)}`);
-
-        try {
-          // 获取编辑信息
-          logMsg(`[${current}/${total}] 获取 #${aid} 编辑信息...`);
-          const info = await getArchiveEditInfo(aid);
-          const archiveData = (info && info.archive) ? info.archive : info;
-
-          // 构建参数，基于原始数据修改
-          const params = { aid: aid, publish: 0 };
-          if (archiveData) {
-            for (const key of ['title', 'copyright', 'desc', 'source', 'dynamic', 'videos', 'subtitle', 'tid_v2']) {
-              if (archiveData[key] !== undefined) params[key] = archiveData[key];
-            }
-          }
-          // 覆盖为我们想要的值
-          params.tid = CONFIG.CATEGORY_TID.DRAWING;   // 绘画
-          params.no_reprint = CONFIG.NO_REPRINT;      // 允许转载
-          params.cover = coverUrl || (archiveData ? archiveData.cover : undefined);
-          if (recommendedTag) params.tag = recommendedTag;
-          // 仅自己可见
-          params.state = 'self_only';
-          params.is_self = 1;
-          // 创作声明：内容无需标注
-          params.is_ai = 0;
-          params.is_risk = 0;
-          params.is_business = 0;
-
-          await saveArchive(params);
-          successCount++;
-          logMsg(`[OK] #${aid} 设置完成`);
-        } catch (err) {
-          failCount++;
-          logMsg(`[FAIL] #${aid}: ${err.message}`);
-        }
-
-        if (current < total) {
-          await delay(CONFIG.DELAY_MS);
-        }
-      }
-
-      hideProgress();
-      const msg = `一键设置完成: 成功 ${successCount}, 失败 ${failCount}`;
-      logMsg(`==== ${msg} ====`);
-      notify(msg, failCount > 0 ? 'warning' : 'success');
-
-      await handleRefresh();
-    } finally {
-      disableAllButtons(false);
-    }
-  }
-
-  function disableAllButtons(disabled) {
-    const panel = document.getElementById('bili-batch-panel');
-    if (!panel) return;
-    panel.querySelectorAll('button.bili-batch-action-btn, button.bili-batch-btn').forEach((btn) => {
-      btn.disabled = disabled;
-      btn.style.opacity = disabled ? '0.5' : '1';
     });
   }
 
+  function makeDraggable(panel) {
+    const header = panel.querySelector('#bili-batch-header');
+    if (!header) return;
+    let d = false, sx, sy, sl, st;
+    header.addEventListener('mousedown', (e) => {
+      if (e.target.tagName === 'BUTTON') return;
+      d = true; sx = e.clientX; sy = e.clientY;
+      const r = panel.getBoundingClientRect(); sl = r.left; st = r.top;
+      panel.style.transition = 'none'; document.body.style.userSelect = 'none';
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!d) return;
+      panel.style.right = 'auto'; panel.style.bottom = 'auto';
+      panel.style.left = (sl + e.clientX - sx) + 'px';
+      panel.style.top = Math.max(0, st + e.clientY - sy) + 'px';
+    });
+    document.addEventListener('mouseup', () => {
+      if (!d) return; d = false; panel.style.transition = ''; document.body.style.userSelect = '';
+    });
+  }
+
+  function showProgress(cur, total, text) {
+    const w = document.getElementById('bili-batch-progress');
+    if (w) w.style.display = 'block';
+    const b = document.getElementById('bili-batch-progress-bar');
+    if (b) b.style.width = Math.round((cur / total) * 100) + '%';
+    const t = document.getElementById('bili-batch-progress-text');
+    if (t) t.textContent = text;
+  }
+
+  function hideProgress() {
+    const w = document.getElementById('bili-batch-progress');
+    if (w) w.style.display = 'none';
+  }
+
+  function disableButtons(v) {
+    document.querySelectorAll('.bili-act').forEach(b => { b.disabled = v; b.style.opacity = v ? '0.5' : '1'; });
+  }
+
   // ===========================
-  // 主入口
+  // 封面选择
+  // ===========================
+
+  async function pickCover() {
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = 'image/jpeg,image/png,image/bmp,image/webp';
+    input.style.display = 'none'; document.body.appendChild(input);
+
+    const got = new Promise((resolve, reject) => {
+      input.onchange = (e) => {
+        const f = e.target.files[0];
+        if (!f) reject(new Error('未选择文件'));
+        else if (f.size > 5 * 1024 * 1024) reject(new Error('图片不能超过 5MB'));
+        else resolve(f);
+      };
+    });
+
+    input.click();
+    try {
+      const file = await got;
+      input.remove();
+      selectedCoverFile = file;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        document.getElementById('bili-batch-cover-img').src = e.target.result;
+        document.getElementById('bili-batch-cover-preview').style.display = 'block';
+      };
+      reader.readAsDataURL(file);
+      logMsg('已选封面: ' + file.name + ' (' + (file.size / 1024).toFixed(0) + 'KB)');
+      notify('封面: ' + file.name, 'success');
+    } catch (err) {
+      input.remove();
+      notify(err.message, 'error');
+    }
+  }
+
+  function clearCover() {
+    selectedCoverFile = null;
+    const p = document.getElementById('bili-batch-cover-preview');
+    if (p) p.style.display = 'none';
+    const img = document.getElementById('bili-batch-cover-img');
+    if (img) img.src = '';
+    logMsg('已清除封面');
+    notify('已清除', 'info');
+  }
+
+  // ===========================
+  // 初始化
   // ===========================
 
   function init() {
-    // 等待页面关键元素加载
-    let retries = 0;
-    const maxRetries = 30;
-    const tryInit = () => {
-      if (document.body) {
-        createPanel();
-        logMsg('B站批量投稿设置助手已启动');
-        logMsg(`当前页面: ${window.location.href}`);
-        logMsg('提示: 请在稿件管理页面点击「刷新列表」加载待处理稿件');
-      } else if (retries < maxRetries) {
-        retries++;
-        setTimeout(tryInit, 500);
-      }
-    };
-    tryInit();
+    if (!document.body) { setTimeout(init, 500); return; }
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes bbfi { from { opacity:0; transform:translateY(-10px); } to { opacity:1; transform:translateY(0); } }
+      .bili-act:hover { filter: brightness(1.15); }
+    `;
+    document.head.appendChild(style);
+    createPanel();
+
+    const tasks = getTasks();
+    document.getElementById('bili-batch-stats').textContent = '检测到 ' + tasks.length + ' 个视频任务';
+    logMsg('B站批量投稿设置助手 v2.1 已启动');
+    logMsg('检测到 ' + tasks.length + ' 个视频任务');
+    logMsg('请选择封面图片，然后点击「一键全部设置」');
+    logMsg('处理期间请勿操作鼠标');
   }
 
-  // DOM 就绪后启动
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
