@@ -307,6 +307,7 @@
   async function processAllTasks() {
     if (processing) { notify('正在处理中...', 'warning'); return; }
 
+    updateStats();
     const tasks = getTasks();
     if (tasks.length === 0) { notify('未找到视频任务', 'error'); return; }
     if (!selectedCoverFile) {
@@ -358,6 +359,7 @@
   // ===========================
 
   async function processDeclarationOnly() {
+    updateStats();
     const tasks = getTasks();
     if (tasks.length === 0) { notify('未找到视频任务', 'error'); return; }
     processing = true; abortFlag = false; disableButtons(true);
@@ -374,6 +376,7 @@
   }
 
   async function processPrivacyOnly() {
+    updateStats();
     const tasks = getTasks();
     if (tasks.length === 0) { notify('未找到视频任务', 'error'); return; }
     processing = true; abortFlag = false; disableButtons(true);
@@ -390,6 +393,7 @@
   }
 
   async function processTagsOnly() {
+    updateStats();
     const tasks = getTasks();
     if (tasks.length === 0) { notify('未找到视频任务', 'error'); return; }
     processing = true; abortFlag = false; disableButtons(true);
@@ -413,6 +417,7 @@
   async function processBatchSubmit() {
     if (processing) { notify('正在处理中...', 'warning'); return; }
 
+    updateStats();
     const tasks = getTasks();
     if (tasks.length === 0) { notify('未找到视频任务', 'error'); return; }
 
@@ -662,13 +667,28 @@
     document.head.appendChild(style);
     createPanel();
 
-    
+    // 延迟检测：Vue 渲染 .task 元素可能需要时间
+    let retries = 0;
+    function tryUpdateStats() {
+      const count = updateStats();
+      if (count === 0 && retries < 20) {
+        retries++;
+        setTimeout(tryUpdateStats, 500);
+      } else {
+        logMsg('B站批量投稿设置助手 v2.1 已启动');
+        logMsg('检测到 ' + count + ' 个视频任务');
+        logMsg('请选择封面图片，然后点击「一键全部设置」');
+        logMsg('处理期间请勿操作鼠标');
+      }
+    }
+    tryUpdateStats();
+  }
+
+  function updateStats() {
     const tasks = getTasks();
-    document.getElementById('bili-batch-stats').textContent = '检测到 ' + tasks.length + ' 个视频任务';
-    logMsg('B站批量投稿设置助手 v2.1 已启动');
-    logMsg('检测到 ' + tasks.length + ' 个视频任务');
-    logMsg('请选择封面图片，然后点击「一键全部设置」');
-    logMsg('处理期间请勿操作鼠标');
+    const el = document.getElementById('bili-batch-stats');
+    if (el) el.textContent = '检测到 ' + tasks.length + ' 个视频任务';
+    return tasks.length;
   }
 
   if (document.readyState === 'loading') {
