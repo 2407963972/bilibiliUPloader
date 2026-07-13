@@ -224,20 +224,14 @@
     await delay(2000);
 
     // 点击封面编辑器里的「完成」按钮
-    const allBtns = panel.querySelectorAll('button');
-    let doneBtn = null;
-    for (const btn of allBtns) {
-      if (btn.textContent.trim() === '完成') { doneBtn = btn; break; }
-    }
-    // 也试试 class 名匹配
-    if (!doneBtn) {
-      doneBtn = panel.querySelector('button[class*="confirm"], button[class*="ok"], button[class*="save"], button[class*="submit"], button[class*="done"], button[class*="complete"]');
-    }
+    // 注意：完成按钮在 .cover-editor 弹窗 > .bcc-dialog__body 中，不在 .cover-editor-panel-select 内
+    const doneBtn = document.querySelector('.cover-editor div.button.submit') ||
+                    [...document.querySelectorAll('.cover-editor div.button, .bcc-dialog div.button')].find(el => el.textContent.trim() === '完成');
     if (doneBtn) {
       doneBtn.click();
       logMsg('  已点击「完成」按钮');
     } else {
-      logMsg('  [WARN] 未找到完成按钮，点空白处关闭');
+      logMsg('  [WARN] 未找到完成按钮');
       document.body.click();
     }
     await delay(500);
