@@ -406,6 +406,76 @@
   }
 
   // ===========================
+  // 独立功能：批量立即投稿
+  // （完全独立，与「一键全部设置」无关）
+  // ===========================
+
+  async function processBatchSubmit() {
+    if (processing) { notify('正在处理中...', 'warning'); return; }
+
+    const tasks = getTasks();
+    if (tasks.length === 0) { notify('未找到视频任务', 'error'); return; }
+
+    // 确认弹窗 — 这是不可逆操作
+    if (!confirm('确定要批量立即投稿全部 ' + tasks.length + ' 个视频吗？\n\n' +
+                 '此操作不可撤销，视频发布后将在你的个人主页中显示。\n\n' +
+                 '建议先确认分区/声明/标签/封面/仅自己可见已设置好。尤其是仅自己可见。')) {
+      return;
+    }
+
+    processing = true;
+    abortFlag = false;
+    disableButtons(true);
+
+    let ok = 0, fail = 0;
+    const total = tasks.length;
+
+    logMsg('==== 批量立即投稿 (共 ' + total + ' 个) ====');
+    notify('开始批量立即投稿，共 ' + total + ' 个', 'info');
+    showProgress(0, total, '0 / ' + total);
+
+    for (let i = 0; i < total; i++) {
+      if (abortFlag) { logMsg('用户中止'); break; }
+
+      const task = tasks[i];
+      const title = task.getAttribute('title') || ('任务 #' + (i + 1));
+      const cur = i + 1;
+      showProgress(cur, total, cur + ' / ' + total + ' — ' + escapeHtml(title));
+      logMsg('[' + cur + '/' + total + '] 投稿「' + title + '」...');
+
+      try {
+        // 1. 选中任务
+        selectTask(task);
+        await delay(CONFIG.DELAY_AFTER_CLICK);
+
+        // 2. 点击「立即投稿」
+        const submitBtn = document.querySelector('.submit-add');
+        if (!submitBtn) {
+          throw new Error('未找到「立即投稿」按钮');
+        }
+        submitBtn.click();
+        logMsg('  已点击「立即投稿」');
+        ok++;
+      } catch (err) {
+        fail++;
+        logMsg('  [FAIL] ' + err.message);
+      }
+
+      if (cur < total && !abortFlag) {
+        // 投稿等待稍长一点，让 B 站后台处理
+        await delay(CONFIG.DELAY_BETWEEN_TASKS + 1000);
+      }
+    }
+
+    processing = false;
+    disableButtons(false);
+    hideProgress();
+    const msg = '批量投稿完成: 成功 ' + ok + ', 失败 ' + fail;
+    logMsg('==== ' + msg + ' ====');
+    notify(msg, fail > 0 ? 'warning' : 'success');
+  }
+
+  // ===========================
   // UI
   // ===========================
 
@@ -449,6 +519,9 @@
             <button class="bili-act" data-action="setPrivacy" style="flex:1; min-width:60px; padding:6px; border:none; border-radius:5px; background:#ff9800; color:#fff; cursor:pointer; font-size:11px;">仅隐私</button>
             <button class="bili-act" data-action="setTags" style="flex:1; min-width:60px; padding:6px; border:none; border-radius:5px; background:#e91e63; color:#fff; cursor:pointer; font-size:11px;">仅标签</button>
           </div>
+          <!-- 独立功能分隔 -->
+          <div style="border-top:2px dashed #ff4d4f; margin:8px 0 4px; padding-top:4px; font-size:10px; color:#ff4d4f; text-align:center;">— 以下为独立功能，与上方无关 —</div>
+          <button class="bili-act" data-action="batchSubmit" style="padding:10px; border:none; border-radius:6px; background:#ff4d4f; color:#fff; cursor:pointer; font-size:13px; font-weight:600;">批量立即投稿（独立）</button>
         </div>
         <details style="font-size:10px;">
           <summary style="cursor:pointer; color:#999;">操作日志</summary>
@@ -484,6 +557,7 @@
         case 'setTags': await processTagsOnly(); break;
         case 'clearCover': clearCover(); break;
         case 'abort': abortFlag = true; break;
+        case 'batchSubmit': await processBatchSubmit(); break;
       }
     });
   }
