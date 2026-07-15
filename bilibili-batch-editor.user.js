@@ -433,27 +433,28 @@
     disableButtons(true);
 
     let ok = 0, fail = 0;
-    const total = tasks.length;
+    let total = tasks.length;
+    let cur = 0;
 
     logMsg('==== 批量立即投稿 (共 ' + total + ' 个) ====');
     notify('开始批量立即投稿，共 ' + total + ' 个', 'info');
     showProgress(0, total, '0 / ' + total);
 
-    for (let i = 0; i < total; i++) {
-      if (abortFlag) { logMsg('用户中止'); break; }
+    // 每轮重新查询 DOM，始终投当前列表里的第一个
+    while (!abortFlag) {
+      const remaining = getTasks();
+      if (remaining.length === 0) break;
 
-      const task = tasks[i];
-      const title = task.getAttribute('title') || ('任务 #' + (i + 1));
-      const cur = i + 1;
+      const task = remaining[0]; // 始终取第一个
+      cur++;
+      const title = task.getAttribute('title') || ('任务 #' + cur);
       showProgress(cur, total, cur + ' / ' + total + ' — ' + escapeHtml(title));
       logMsg('[' + cur + '/' + total + '] 投稿「' + title + '」...');
 
       try {
-        // 1. 选中任务
         selectTask(task);
         await delay(CONFIG.DELAY_AFTER_CLICK);
 
-        // 2. 点击「立即投稿」
         const submitBtn = document.querySelector('.submit-add');
         if (!submitBtn) {
           throw new Error('未找到「立即投稿」按钮');
@@ -466,8 +467,8 @@
         logMsg('  [FAIL] ' + err.message);
       }
 
-      if (cur < total && !abortFlag) {
-        // 投稿等待稍长一点，让 B 站后台处理
+      if (!abortFlag) {
+        // 等待投稿完成，让 B 站处理并从列表中移除
         await delay(CONFIG.DELAY_BETWEEN_TASKS + 1000);
       }
     }
